@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+streamlit.log
+portfolio.csv
+krw_assets.csv
+.streamlit/secrets.toml
+.claude/
+taste-skill/
