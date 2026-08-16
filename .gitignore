@@ -7,6 +7,8 @@ portfolio.csv
 kr_portfolio.csv
 krw_assets.csv
 usd_assets.csv
+target_allocation.csv
+asset_history.csv
 .streamlit/secrets.toml
 .claude/
 taste-skill/

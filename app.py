@@ -19,6 +19,21 @@ USD_FILE = "usd_assets.csv"
 USD_COLUMNS = ["Name", "Category", "Amount"]
 USD_CATEGORIES = ["현금", "예금/적금(MMF 등)", "채권", "기타"]
 
+TARGET_FILE = "target_allocation.csv"
+TARGET_COLUMNS = ["Category", "TargetPct"]
+TARGET_CATEGORIES = ["미국주식", "한국주식", "원화자산", "달러자산"]
+
+HISTORY_FILE = "asset_history.csv"
+HISTORY_COLUMNS = [
+    "Date",
+    "TotalKRW",
+    "TotalUSD",
+    "USStockKRW",
+    "KRStockKRW",
+    "KRWAssetsKRW",
+    "USDAssetsKRW",
+]
+
 st.set_page_config(page_title="전체 자산배분 현황", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown(
@@ -123,6 +138,38 @@ def save_usd_assets(df: pd.DataFrame) -> None:
     df.to_csv(USD_FILE, index=False)
 
 
+def load_target_allocation() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(TARGET_FILE)
+        for col in TARGET_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0
+        return df[TARGET_COLUMNS]
+    except FileNotFoundError:
+        return pd.DataFrame(
+            [{"Category": c, "TargetPct": 25.0} for c in TARGET_CATEGORIES]
+        )
+
+
+def save_target_allocation(df: pd.DataFrame) -> None:
+    df.to_csv(TARGET_FILE, index=False)
+
+
+def load_history() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(HISTORY_FILE)
+        for col in HISTORY_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0
+        return df[HISTORY_COLUMNS]
+    except FileNotFoundError:
+        return pd.DataFrame(columns=HISTORY_COLUMNS)
+
+
+def save_history(df: pd.DataFrame) -> None:
+    df.to_csv(HISTORY_FILE, index=False)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_prices(tickers: tuple[str, ...]) -> dict[str, dict]:
     result = {}
@@ -173,6 +220,10 @@ if "krw_assets" not in st.session_state:
     st.session_state.krw_assets = load_krw_assets()
 if "usd_assets" not in st.session_state:
     st.session_state.usd_assets = load_usd_assets()
+if "target_alloc" not in st.session_state:
+    st.session_state.target_alloc = load_target_allocation()
+if "history" not in st.session_state:
+    st.session_state.history = load_history()
 
 st.title("💰 전체 자산배분 현황")
 
@@ -450,6 +501,38 @@ with st.sidebar:
         st.download_button("CSV 다운로드", usd_csv_bytes, "usd_assets_export.csv", "text/csv", key="usd_dl")
 
     st.divider()
+    st.header("🎯 목표 비중 설정")
+    st.caption("리밸런싱 계산에 사용할 자산군별 목표 비중 (%). 저장 버튼을 눌러야 반영됩니다.")
+
+    saved_target_map = dict(
+        zip(st.session_state.target_alloc["Category"], st.session_state.target_alloc["TargetPct"])
+    )
+    new_targets = {}
+    for cat in TARGET_CATEGORIES:
+        new_targets[cat] = st.number_input(
+            cat,
+            min_value=0.0,
+            max_value=100.0,
+            value=float(saved_target_map.get(cat, 25.0)),
+            step=1.0,
+            key=f"target_input_{cat}",
+        )
+    total_target_pct = sum(new_targets.values())
+    if abs(total_target_pct - 100) < 0.5:
+        st.caption(f"✅ 합계: {total_target_pct:.1f}%")
+    else:
+        st.caption(f"⚠️ 합계: {total_target_pct:.1f}% (100%가 되도록 조정하세요)")
+
+    if st.button("목표 비중 저장", key="target_save"):
+        target_df = pd.DataFrame(
+            [{"Category": c, "TargetPct": v} for c, v in new_targets.items()]
+        )
+        st.session_state.target_alloc = target_df
+        save_target_allocation(target_df)
+        st.success("저장 완료")
+        st.rerun()
+
+    st.divider()
     if st.button("🔄 시세/환율 새로고침"):
         fetch_prices.clear()
         fetch_usdkrw.clear()
@@ -572,6 +655,57 @@ total_usd_assets_krw = total_usd_assets * usdkrw
 grand_total_krw = total_stock_krw + total_kr_stock_krw + total_krw_assets + total_usd_assets_krw
 grand_total_usd = total_stock_usd + (total_kr_stock_krw / usdkrw if usdkrw else 0) + total_krw_assets_usd + total_usd_assets
 
+current_by_category_krw = {
+    "미국주식": total_stock_krw,
+    "한국주식": total_kr_stock_krw,
+    "원화자산": total_krw_assets,
+    "달러자산": total_usd_assets_krw,
+}
+
+# ---------------- Rebalancing ----------------
+target_map = dict(
+    zip(st.session_state.target_alloc["Category"], st.session_state.target_alloc["TargetPct"])
+)
+rebalance_rows = []
+for cat in TARGET_CATEGORIES:
+    current_amt = current_by_category_krw.get(cat, 0.0)
+    current_pct = (current_amt / grand_total_krw * 100) if grand_total_krw else 0.0
+    target_pct = float(target_map.get(cat, 0.0))
+    target_amt = grand_total_krw * target_pct / 100
+    rebalance_rows.append(
+        {
+            "구분": cat,
+            "현재금액(KRW)": current_amt,
+            "현재비중%": current_pct,
+            "목표비중%": target_pct,
+            "차이%": current_pct - target_pct,
+            "조정필요액(KRW)": target_amt - current_amt,
+        }
+    )
+rebalance_df = pd.DataFrame(rebalance_rows)
+
+# ---------------- Asset history snapshot (once per day, latest value kept) ----------------
+if grand_total_krw > 0:
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    hist = st.session_state.history
+    hist = hist[hist["Date"] != today_str]
+    new_snapshot = pd.DataFrame(
+        [
+            {
+                "Date": today_str,
+                "TotalKRW": grand_total_krw,
+                "TotalUSD": grand_total_usd,
+                "USStockKRW": total_stock_krw,
+                "KRStockKRW": total_kr_stock_krw,
+                "KRWAssetsKRW": total_krw_assets,
+                "USDAssetsKRW": total_usd_assets_krw,
+            }
+        ]
+    )
+    hist = pd.concat([hist, new_snapshot], ignore_index=True).sort_values("Date").reset_index(drop=True)
+    st.session_state.history = hist
+    save_history(hist)
+
 # ---------------- Unified asset table (for total allocation view) ----------------
 unified_rows = []
 for _, r in portfolio.iterrows():
@@ -646,9 +780,11 @@ st.caption(f"USD/KRW 환율: {usdkrw:,.2f}  |  마지막 업데이트: {datetime
 
 st.divider()
 
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab0, tab_reb, tab_hist, tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "💰 전체 자산 배분",
+        "⚖️ 리밸런싱",
+        "📈 자산 추이",
         "🇺🇸 종목별 배분",
         "🏭 섹터별 배분",
         "📋 미국주식 보유 내역",
@@ -699,6 +835,73 @@ with tab0:
             use_container_width=True,
             height=350,
         )
+
+with tab_reb:
+    st.caption("사이드바 '🎯 목표 비중 설정'에서 저장한 목표 비중을 기준으로 계산합니다.")
+    target_sum = sum(target_map.values())
+    if abs(target_sum - 100) > 0.5:
+        st.warning(f"목표 비중 합계가 {target_sum:.1f}%로 100%가 아닙니다. 사이드바에서 조정 후 저장해주세요.")
+
+    reb_chart_df = rebalance_df.melt(
+        id_vars="구분", value_vars=["현재비중%", "목표비중%"], var_name="구분2", value_name="비중%"
+    )
+    fig_reb = px.bar(
+        reb_chart_df, x="구분", y="비중%", color="구분2", barmode="group",
+        title="현재 비중 vs 목표 비중", text_auto=".1f",
+    )
+    st.plotly_chart(fig_reb, use_container_width=True)
+
+    st.dataframe(
+        rebalance_df.style.format(
+            {
+                "현재금액(KRW)": "₩{:,.0f}",
+                "현재비중%": "{:.1f}%",
+                "목표비중%": "{:.1f}%",
+                "차이%": "{:+.1f}%",
+                "조정필요액(KRW)": "₩{:+,.0f}",
+            }
+        ),
+        use_container_width=True,
+    )
+    st.caption("조정필요액이 **양수(+)면 매수**(비중 부족), **음수(-)면 매도**(비중 초과)가 필요하다는 뜻입니다.")
+
+with tab_hist:
+    hist_df = st.session_state.history.copy()
+    if hist_df.empty:
+        st.info("아직 기록된 자산 추이가 없습니다. 앱을 사용할 때마다 오늘 날짜 스냅샷이 자동으로 저장됩니다.")
+    else:
+        hist_df["Date"] = pd.to_datetime(hist_df["Date"])
+        fig_hist = px.line(
+            hist_df, x="Date", y="TotalKRW", markers=True, title="총자산 추이 (KRW)"
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+        fig_hist_area = px.area(
+            hist_df,
+            x="Date",
+            y=["USStockKRW", "KRStockKRW", "KRWAssetsKRW", "USDAssetsKRW"],
+            title="자산군별 추이 (KRW)",
+        )
+        st.plotly_chart(fig_hist_area, use_container_width=True)
+
+        st.dataframe(
+            hist_df.sort_values("Date", ascending=False).style.format(
+                {
+                    "TotalKRW": "₩{:,.0f}",
+                    "TotalUSD": "${:,.2f}",
+                    "USStockKRW": "₩{:,.0f}",
+                    "KRStockKRW": "₩{:,.0f}",
+                    "KRWAssetsKRW": "₩{:,.0f}",
+                    "USDAssetsKRW": "₩{:,.0f}",
+                }
+            ),
+            use_container_width=True,
+        )
+        hist_csv_bytes = st.session_state.history.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "자산 추이 CSV 다운로드", hist_csv_bytes, "asset_history_export.csv", "text/csv", key="hist_dl"
+        )
+    st.caption("⚠️ 무료 클라우드 호스팅은 컨테이너가 재시작되면 기록이 초기화될 수 있습니다. 주기적으로 CSV 백업을 권장합니다.")
 
 with tab1:
     if portfolio.empty:
