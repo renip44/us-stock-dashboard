@@ -8,6 +8,7 @@ kr_portfolio.csv
 krw_assets.csv
 usd_assets.csv
 target_allocation.csv
+index_group_targets.csv
 asset_history.csv
 .streamlit/secrets.toml
 .claude/

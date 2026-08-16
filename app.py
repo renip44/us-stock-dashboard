@@ -6,10 +6,13 @@ import streamlit as st
 import yfinance as yf
 
 PORTFOLIO_FILE = "portfolio.csv"
-REQUIRED_COLUMNS = ["Ticker", "Shares", "AvgCost"]
+REQUIRED_COLUMNS = ["Ticker", "Shares", "AvgCost", "IndexGroup"]
 
 KR_FILE = "kr_portfolio.csv"
-KR_COLUMNS = ["Ticker", "Shares", "AvgCost", "USExposure"]
+KR_COLUMNS = ["Ticker", "Shares", "AvgCost", "USExposure", "IndexGroup"]
+
+INDEX_GROUP_TARGET_FILE = "index_group_targets.csv"
+INDEX_GROUP_TARGET_COLUMNS = ["Group", "TargetPct"]
 
 KRW_FILE = "krw_assets.csv"
 KRW_COLUMNS = ["Name", "Category", "Amount"]
@@ -83,7 +86,8 @@ def load_portfolio() -> pd.DataFrame:
         df = pd.read_csv(PORTFOLIO_FILE)
         for col in REQUIRED_COLUMNS:
             if col not in df.columns:
-                df[col] = 0
+                df[col] = "" if col == "IndexGroup" else 0
+        df["IndexGroup"] = df["IndexGroup"].fillna("").astype(str)
         return df[REQUIRED_COLUMNS]
     except FileNotFoundError:
         return pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -98,8 +102,14 @@ def load_kr_portfolio() -> pd.DataFrame:
         df = pd.read_csv(KR_FILE)
         for col in KR_COLUMNS:
             if col not in df.columns:
-                df[col] = False if col == "USExposure" else 0
+                if col == "USExposure":
+                    df[col] = False
+                elif col == "IndexGroup":
+                    df[col] = ""
+                else:
+                    df[col] = 0
         df["USExposure"] = df["USExposure"].fillna(False).astype(bool)
+        df["IndexGroup"] = df["IndexGroup"].fillna("").astype(str)
         return df[KR_COLUMNS]
     except FileNotFoundError:
         return pd.DataFrame(columns=KR_COLUMNS)
@@ -154,6 +164,21 @@ def load_target_allocation() -> pd.DataFrame:
 
 def save_target_allocation(df: pd.DataFrame) -> None:
     df.to_csv(TARGET_FILE, index=False)
+
+
+def load_index_group_targets() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(INDEX_GROUP_TARGET_FILE)
+        for col in INDEX_GROUP_TARGET_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0
+        return df[INDEX_GROUP_TARGET_COLUMNS]
+    except FileNotFoundError:
+        return pd.DataFrame(columns=INDEX_GROUP_TARGET_COLUMNS)
+
+
+def save_index_group_targets(df: pd.DataFrame) -> None:
+    df.to_csv(INDEX_GROUP_TARGET_FILE, index=False)
 
 
 def load_history() -> pd.DataFrame:
@@ -223,6 +248,8 @@ if "usd_assets" not in st.session_state:
     st.session_state.usd_assets = load_usd_assets()
 if "target_alloc" not in st.session_state:
     st.session_state.target_alloc = load_target_allocation()
+if "index_group_targets" not in st.session_state:
+    st.session_state.index_group_targets = load_index_group_targets()
 if "history" not in st.session_state:
     st.session_state.history = load_history()
 
@@ -238,6 +265,11 @@ with st.sidebar:
         ticker = c1.text_input("티커 (예: AAPL)").strip().upper()
         shares = c2.number_input("수량", min_value=0.0, step=1.0, value=0.0)
         avg_cost = st.number_input("평단가 (USD, 선택)", min_value=0.0, step=0.01, value=0.0)
+        index_group = st.text_input(
+            "인덱스 그룹 (선택, 종목그룹 리밸런싱용)",
+            key="us_index_group_input",
+            placeholder="예: S&P500 / QQQ / 레버리지2배 / 레버리지3배",
+        ).strip()
         submitted = st.form_submit_button("추가")
         if submitted and ticker and shares > 0:
             df = st.session_state.portfolio
@@ -245,9 +277,11 @@ with st.sidebar:
                 df.loc[df["Ticker"] == ticker, "Shares"] += shares
                 if avg_cost > 0:
                     df.loc[df["Ticker"] == ticker, "AvgCost"] = avg_cost
+                if index_group:
+                    df.loc[df["Ticker"] == ticker, "IndexGroup"] = index_group
             else:
                 new_row = pd.DataFrame(
-                    [{"Ticker": ticker, "Shares": shares, "AvgCost": avg_cost}]
+                    [{"Ticker": ticker, "Shares": shares, "AvgCost": avg_cost, "IndexGroup": index_group}]
                 )
                 df = pd.concat([df, new_row], ignore_index=True)
             st.session_state.portfolio = df
@@ -261,8 +295,9 @@ with st.sidebar:
                 new_df = pd.read_csv(uploaded)
                 for col in REQUIRED_COLUMNS:
                     if col not in new_df.columns:
-                        new_df[col] = 0
+                        new_df[col] = "" if col == "IndexGroup" else 0
                 new_df = new_df[REQUIRED_COLUMNS]
+                new_df["IndexGroup"] = new_df["IndexGroup"].fillna("").astype(str)
                 mode = st.radio("가져오기 방식", ["교체", "병합(합산)"], horizontal=True, key="stock_mode")
                 if st.button("CSV 적용", key="stock_apply"):
                     if mode == "교체":
@@ -270,7 +305,7 @@ with st.sidebar:
                     else:
                         merged = pd.concat([st.session_state.portfolio, new_df], ignore_index=True)
                         merged = merged.groupby("Ticker", as_index=False).agg(
-                            {"Shares": "sum", "AvgCost": "last"}
+                            {"Shares": "sum", "AvgCost": "last", "IndexGroup": "last"}
                         )
                         st.session_state.portfolio = merged
                     save_portfolio(st.session_state.portfolio)
@@ -290,6 +325,7 @@ with st.sidebar:
             edited = edited.dropna(subset=["Ticker"])
             edited["Ticker"] = edited["Ticker"].astype(str).str.upper().str.strip()
             edited = edited[edited["Ticker"] != ""]
+            edited["IndexGroup"] = edited["IndexGroup"].fillna("").astype(str)
             st.session_state.portfolio = edited.reset_index(drop=True)
             save_portfolio(st.session_state.portfolio)
             st.success("저장 완료")
@@ -310,6 +346,11 @@ with st.sidebar:
         kr_us_exposure = st.checkbox(
             "미국지수 추종 ETF (자산배분 계산 시 미국주식으로 집계)", key="kr_us_exposure_input"
         )
+        kr_index_group = st.text_input(
+            "인덱스 그룹 (선택, 종목그룹 리밸런싱용)",
+            key="kr_index_group_input",
+            placeholder="예: S&P500 / QQQ / 레버리지2배 / 레버리지3배",
+        ).strip()
         kr_submitted_stock = st.form_submit_button("추가")
         if kr_submitted_stock and kr_ticker and kr_shares > 0:
             df = st.session_state.kr_portfolio
@@ -318,9 +359,17 @@ with st.sidebar:
                 if kr_avg_cost > 0:
                     df.loc[df["Ticker"] == kr_ticker, "AvgCost"] = kr_avg_cost
                 df.loc[df["Ticker"] == kr_ticker, "USExposure"] = kr_us_exposure
+                if kr_index_group:
+                    df.loc[df["Ticker"] == kr_ticker, "IndexGroup"] = kr_index_group
             else:
                 new_row = pd.DataFrame(
-                    [{"Ticker": kr_ticker, "Shares": kr_shares, "AvgCost": kr_avg_cost, "USExposure": kr_us_exposure}]
+                    [{
+                        "Ticker": kr_ticker,
+                        "Shares": kr_shares,
+                        "AvgCost": kr_avg_cost,
+                        "USExposure": kr_us_exposure,
+                        "IndexGroup": kr_index_group,
+                    }]
                 )
                 df = pd.concat([df, new_row], ignore_index=True)
             st.session_state.kr_portfolio = df
@@ -334,9 +383,15 @@ with st.sidebar:
                 new_kr_df = pd.read_csv(kr_uploaded)
                 for col in KR_COLUMNS:
                     if col not in new_kr_df.columns:
-                        new_kr_df[col] = False if col == "USExposure" else 0
+                        if col == "USExposure":
+                            new_kr_df[col] = False
+                        elif col == "IndexGroup":
+                            new_kr_df[col] = ""
+                        else:
+                            new_kr_df[col] = 0
                 new_kr_df = new_kr_df[KR_COLUMNS]
                 new_kr_df["USExposure"] = new_kr_df["USExposure"].fillna(False).astype(bool)
+                new_kr_df["IndexGroup"] = new_kr_df["IndexGroup"].fillna("").astype(str)
                 kr_mode = st.radio("가져오기 방식", ["교체", "병합(합산)"], horizontal=True, key="kr_stock_mode")
                 if st.button("CSV 적용", key="kr_stock_apply"):
                     if kr_mode == "교체":
@@ -344,7 +399,7 @@ with st.sidebar:
                     else:
                         merged = pd.concat([st.session_state.kr_portfolio, new_kr_df], ignore_index=True)
                         merged = merged.groupby("Ticker", as_index=False).agg(
-                            {"Shares": "sum", "AvgCost": "last", "USExposure": "last"}
+                            {"Shares": "sum", "AvgCost": "last", "USExposure": "last", "IndexGroup": "last"}
                         )
                         st.session_state.kr_portfolio = merged
                     save_kr_portfolio(st.session_state.kr_portfolio)
@@ -365,6 +420,7 @@ with st.sidebar:
             kr_edited["Ticker"] = kr_edited["Ticker"].astype(str).str.upper().str.strip()
             kr_edited = kr_edited[kr_edited["Ticker"] != ""]
             kr_edited["USExposure"] = kr_edited["USExposure"].fillna(False).astype(bool)
+            kr_edited["IndexGroup"] = kr_edited["IndexGroup"].fillna("").astype(str)
             st.session_state.kr_portfolio = kr_edited.reset_index(drop=True)
             save_kr_portfolio(st.session_state.kr_portfolio)
             st.success("저장 완료")
@@ -540,6 +596,50 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    st.header("📐 종목그룹 목표 비중")
+    st.caption(
+        "미국주식/한국주식 종목 추가 시 입력한 '인덱스 그룹' 태그(예: S&P500, QQQ, 레버리지2배)가 붙은 "
+        "종목들만 대상으로 별도 리밸런싱합니다. 태그가 없는 종목·현금성 자산은 여기서 제외됩니다."
+    )
+    existing_groups = sorted(
+        set(
+            list(st.session_state.portfolio["IndexGroup"].astype(str).str.strip())
+            + list(st.session_state.kr_portfolio["IndexGroup"].astype(str).str.strip())
+        )
+        - {""}
+    )
+    if not existing_groups:
+        st.caption("아직 인덱스 그룹이 태그된 종목이 없습니다. 위 종목 추가 폼에서 태그를 입력해보세요.")
+    else:
+        saved_group_target_map = dict(
+            zip(st.session_state.index_group_targets["Group"], st.session_state.index_group_targets["TargetPct"])
+        )
+        new_group_targets = {}
+        for g in existing_groups:
+            new_group_targets[g] = st.number_input(
+                g,
+                min_value=0.0,
+                max_value=100.0,
+                value=float(saved_group_target_map.get(g, 0.0)),
+                step=1.0,
+                key=f"group_target_input_{g}",
+            )
+        total_group_target_pct = sum(new_group_targets.values())
+        if abs(total_group_target_pct - 100) < 0.5:
+            st.caption(f"✅ 합계: {total_group_target_pct:.1f}%")
+        else:
+            st.caption(f"⚠️ 합계: {total_group_target_pct:.1f}% (태그된 종목 내에서 100%가 되도록 조정하세요)")
+
+        if st.button("종목그룹 목표 비중 저장", key="group_target_save"):
+            group_target_df = pd.DataFrame(
+                [{"Group": g, "TargetPct": v} for g, v in new_group_targets.items()]
+            )
+            st.session_state.index_group_targets = group_target_df
+            save_index_group_targets(group_target_df)
+            st.success("저장 완료")
+            st.rerun()
+
+    st.divider()
     if st.button("🔄 시세/환율 새로고침"):
         fetch_prices.clear()
         fetch_usdkrw.clear()
@@ -550,12 +650,14 @@ portfolio = st.session_state.portfolio.copy()
 portfolio = portfolio.dropna(subset=["Ticker"])
 portfolio["Ticker"] = portfolio["Ticker"].astype(str).str.strip()
 portfolio = portfolio[portfolio["Ticker"] != ""]
+portfolio["IndexGroup"] = portfolio["IndexGroup"].fillna("").astype(str).str.strip()
 
 kr_portfolio = st.session_state.kr_portfolio.copy()
 kr_portfolio = kr_portfolio.dropna(subset=["Ticker"])
 kr_portfolio["Ticker"] = kr_portfolio["Ticker"].astype(str).str.upper().str.strip()
 kr_portfolio = kr_portfolio[kr_portfolio["Ticker"] != ""]
 kr_portfolio["USExposure"] = kr_portfolio["USExposure"].fillna(False).astype(bool)
+kr_portfolio["IndexGroup"] = kr_portfolio["IndexGroup"].fillna("").astype(str).str.strip()
 
 krw_assets = st.session_state.krw_assets.copy()
 krw_assets = krw_assets.dropna(subset=["Name"])
@@ -702,6 +804,52 @@ for cat in TARGET_CATEGORIES:
     )
 rebalance_df = pd.DataFrame(rebalance_rows)
 
+# ---------------- Index-group rebalancing (specific tickers only, e.g. S&P500/QQQ/leverage) ----------------
+us_tagged = portfolio[portfolio["IndexGroup"] != ""][["Ticker", "IndexGroup", "MarketValueUSD"]].copy()
+us_tagged["MarketValueKRW"] = us_tagged["MarketValueUSD"] * usdkrw
+kr_tagged = kr_portfolio[kr_portfolio["IndexGroup"] != ""][["Ticker", "IndexGroup", "MarketValueKRW"]].copy()
+group_tagged_df = pd.concat(
+    [us_tagged[["Ticker", "IndexGroup", "MarketValueKRW"]], kr_tagged], ignore_index=True
+)
+group_summary_df = (
+    group_tagged_df.groupby("IndexGroup", as_index=False)["MarketValueKRW"].sum().rename(columns={"IndexGroup": "Group"})
+    if not group_tagged_df.empty
+    else pd.DataFrame(columns=["Group", "MarketValueKRW"])
+)
+total_tagged_krw = group_summary_df["MarketValueKRW"].sum() if not group_summary_df.empty else 0.0
+
+group_target_map = dict(
+    zip(st.session_state.index_group_targets["Group"], st.session_state.index_group_targets["TargetPct"])
+)
+all_index_groups = sorted(set(group_summary_df["Group"]).union(group_target_map.keys())) if (
+    not group_summary_df.empty or group_target_map
+) else []
+group_rebalance_rows = []
+for g in all_index_groups:
+    current_amt = (
+        float(group_summary_df.loc[group_summary_df["Group"] == g, "MarketValueKRW"].sum())
+        if not group_summary_df.empty
+        else 0.0
+    )
+    current_pct = (current_amt / total_tagged_krw * 100) if total_tagged_krw else 0.0
+    target_pct = float(group_target_map.get(g, 0.0))
+    target_amt = total_tagged_krw * target_pct / 100
+    group_rebalance_rows.append(
+        {
+            "그룹": g,
+            "현재금액(KRW)": current_amt,
+            "현재비중%": current_pct,
+            "목표비중%": target_pct,
+            "차이%": current_pct - target_pct,
+            "조정필요액(KRW)": target_amt - current_amt,
+        }
+    )
+group_rebalance_df = pd.DataFrame(group_rebalance_rows)
+
+untagged_us_krw = portfolio.loc[portfolio["IndexGroup"] == "", "MarketValueUSD"].sum() * usdkrw if not portfolio.empty else 0.0
+untagged_kr_krw = kr_portfolio.loc[kr_portfolio["IndexGroup"] == "", "MarketValueKRW"].sum() if not kr_portfolio.empty else 0.0
+untagged_krw = untagged_us_krw + untagged_kr_krw
+
 # ---------------- Asset history snapshot (once per day, latest value kept) ----------------
 if grand_total_krw > 0:
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -798,10 +946,11 @@ st.caption(f"USD/KRW 환율: {usdkrw:,.2f}  |  마지막 업데이트: {datetime
 
 st.divider()
 
-tab0, tab_reb, tab_hist, tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab0, tab_reb, tab_greb, tab_hist, tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "💰 전체 자산 배분",
         "⚖️ 리밸런싱",
+        "🎯 종목그룹 리밸런싱",
         "📈 자산 추이",
         "🇺🇸 종목별 배분",
         "🏭 섹터별 배분",
@@ -882,6 +1031,54 @@ with tab_reb:
         use_container_width=True,
     )
     st.caption("조정필요액이 **양수(+)면 매수**(비중 부족), **음수(-)면 매도**(비중 초과)가 필요하다는 뜻입니다.")
+
+with tab_greb:
+    st.caption(
+        "종목 추가 시 입력한 '인덱스 그룹' 태그가 붙은 종목만 대상으로 계산합니다. "
+        "태그 입력·목표 비중 설정은 사이드바 '📐 종목그룹 목표 비중'에서 합니다."
+    )
+    if group_rebalance_df.empty:
+        st.info("아직 인덱스 그룹이 태그된 종목이 없습니다. 미국주식/한국주식 추가 시 'S&P500', 'QQQ', '레버리지2배' 등으로 태그해보세요.")
+    else:
+        group_target_sum = sum(group_target_map.values())
+        if abs(group_target_sum - 100) > 0.5:
+            st.warning(f"종목그룹 목표 비중 합계가 {group_target_sum:.1f}%로 100%가 아닙니다. 사이드바에서 조정 후 저장해주세요.")
+
+        st.metric("종목그룹 리밸런싱 대상 총액 (KRW)", f"₩{total_tagged_krw:,.0f}")
+
+        greb_chart_df = group_rebalance_df.melt(
+            id_vars="그룹", value_vars=["현재비중%", "목표비중%"], var_name="구분2", value_name="비중%"
+        )
+        fig_greb = px.bar(
+            greb_chart_df, x="그룹", y="비중%", color="구분2", barmode="group",
+            title="종목그룹별 현재 비중 vs 목표 비중", text_auto=".1f",
+        )
+        st.plotly_chart(fig_greb, use_container_width=True)
+
+        st.dataframe(
+            group_rebalance_df.style.format(
+                {
+                    "현재금액(KRW)": "₩{:,.0f}",
+                    "현재비중%": "{:.1f}%",
+                    "목표비중%": "{:.1f}%",
+                    "차이%": "{:+.1f}%",
+                    "조정필요액(KRW)": "₩{:+,.0f}",
+                }
+            ),
+            use_container_width=True,
+        )
+        st.caption("조정필요액이 **양수(+)면 매수**(비중 부족), **음수(-)면 매도**(비중 초과)가 필요하다는 뜻입니다.")
+
+        with st.expander("어떤 종목이 어느 그룹에 태그됐는지 보기"):
+            st.dataframe(
+                group_tagged_df.rename(columns={"IndexGroup": "그룹", "MarketValueKRW": "금액(KRW)"}).style.format(
+                    {"금액(KRW)": "₩{:,.0f}"}
+                ),
+                use_container_width=True,
+            )
+
+        if untagged_krw > 0:
+            st.caption(f"ℹ️ 태그되지 않은 보유 종목 합계 ₩{untagged_krw:,.0f}는 이 리밸런싱에 포함되지 않습니다.")
 
 with tab_hist:
     hist_df = st.session_state.history.copy()
