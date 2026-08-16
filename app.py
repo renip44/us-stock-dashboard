@@ -9,7 +9,7 @@ PORTFOLIO_FILE = "portfolio.csv"
 REQUIRED_COLUMNS = ["Ticker", "Shares", "AvgCost"]
 
 KR_FILE = "kr_portfolio.csv"
-KR_COLUMNS = ["Ticker", "Shares", "AvgCost"]
+KR_COLUMNS = ["Ticker", "Shares", "AvgCost", "USExposure"]
 
 KRW_FILE = "krw_assets.csv"
 KRW_COLUMNS = ["Name", "Category", "Amount"]
@@ -98,7 +98,8 @@ def load_kr_portfolio() -> pd.DataFrame:
         df = pd.read_csv(KR_FILE)
         for col in KR_COLUMNS:
             if col not in df.columns:
-                df[col] = 0
+                df[col] = False if col == "USExposure" else 0
+        df["USExposure"] = df["USExposure"].fillna(False).astype(bool)
         return df[KR_COLUMNS]
     except FileNotFoundError:
         return pd.DataFrame(columns=KR_COLUMNS)
@@ -306,6 +307,9 @@ with st.sidebar:
         kr_ticker = c1.text_input("티커 (예: 005930.KS)").strip().upper()
         kr_shares = c2.number_input("수량", min_value=0.0, step=1.0, value=0.0, key="kr_shares")
         kr_avg_cost = st.number_input("평단가 (KRW, 선택)", min_value=0.0, step=100.0, value=0.0, key="kr_avg_cost")
+        kr_us_exposure = st.checkbox(
+            "미국지수 추종 ETF (자산배분 계산 시 미국주식으로 집계)", key="kr_us_exposure_input"
+        )
         kr_submitted_stock = st.form_submit_button("추가")
         if kr_submitted_stock and kr_ticker and kr_shares > 0:
             df = st.session_state.kr_portfolio
@@ -313,9 +317,10 @@ with st.sidebar:
                 df.loc[df["Ticker"] == kr_ticker, "Shares"] += kr_shares
                 if kr_avg_cost > 0:
                     df.loc[df["Ticker"] == kr_ticker, "AvgCost"] = kr_avg_cost
+                df.loc[df["Ticker"] == kr_ticker, "USExposure"] = kr_us_exposure
             else:
                 new_row = pd.DataFrame(
-                    [{"Ticker": kr_ticker, "Shares": kr_shares, "AvgCost": kr_avg_cost}]
+                    [{"Ticker": kr_ticker, "Shares": kr_shares, "AvgCost": kr_avg_cost, "USExposure": kr_us_exposure}]
                 )
                 df = pd.concat([df, new_row], ignore_index=True)
             st.session_state.kr_portfolio = df
@@ -329,8 +334,9 @@ with st.sidebar:
                 new_kr_df = pd.read_csv(kr_uploaded)
                 for col in KR_COLUMNS:
                     if col not in new_kr_df.columns:
-                        new_kr_df[col] = 0
+                        new_kr_df[col] = False if col == "USExposure" else 0
                 new_kr_df = new_kr_df[KR_COLUMNS]
+                new_kr_df["USExposure"] = new_kr_df["USExposure"].fillna(False).astype(bool)
                 kr_mode = st.radio("가져오기 방식", ["교체", "병합(합산)"], horizontal=True, key="kr_stock_mode")
                 if st.button("CSV 적용", key="kr_stock_apply"):
                     if kr_mode == "교체":
@@ -338,7 +344,7 @@ with st.sidebar:
                     else:
                         merged = pd.concat([st.session_state.kr_portfolio, new_kr_df], ignore_index=True)
                         merged = merged.groupby("Ticker", as_index=False).agg(
-                            {"Shares": "sum", "AvgCost": "last"}
+                            {"Shares": "sum", "AvgCost": "last", "USExposure": "last"}
                         )
                         st.session_state.kr_portfolio = merged
                     save_kr_portfolio(st.session_state.kr_portfolio)
@@ -358,6 +364,7 @@ with st.sidebar:
             kr_edited = kr_edited.dropna(subset=["Ticker"])
             kr_edited["Ticker"] = kr_edited["Ticker"].astype(str).str.upper().str.strip()
             kr_edited = kr_edited[kr_edited["Ticker"] != ""]
+            kr_edited["USExposure"] = kr_edited["USExposure"].fillna(False).astype(bool)
             st.session_state.kr_portfolio = kr_edited.reset_index(drop=True)
             save_kr_portfolio(st.session_state.kr_portfolio)
             st.success("저장 완료")
@@ -548,6 +555,7 @@ kr_portfolio = st.session_state.kr_portfolio.copy()
 kr_portfolio = kr_portfolio.dropna(subset=["Ticker"])
 kr_portfolio["Ticker"] = kr_portfolio["Ticker"].astype(str).str.upper().str.strip()
 kr_portfolio = kr_portfolio[kr_portfolio["Ticker"] != ""]
+kr_portfolio["USExposure"] = kr_portfolio["USExposure"].fillna(False).astype(bool)
 
 krw_assets = st.session_state.krw_assets.copy()
 krw_assets = krw_assets.dropna(subset=["Name"])
@@ -642,6 +650,11 @@ kr_portfolio["Weight%"] = (
     kr_portfolio["MarketValueKRW"] / total_kr_stock_krw * 100 if total_kr_stock_krw else 0
 )
 
+kr_us_tracking_krw = (
+    kr_portfolio.loc[kr_portfolio["USExposure"], "MarketValueKRW"].sum() if not kr_portfolio.empty else 0.0
+)
+kr_domestic_krw = total_kr_stock_krw - kr_us_tracking_krw
+
 if not usdkrw:
     st.error("환율 조회에 실패했습니다. 새로고침을 눌러 다시 시도해주세요. (원화 환산 금액이 부정확할 수 있습니다)")
     usdkrw = 0.0
@@ -655,9 +668,14 @@ total_usd_assets_krw = total_usd_assets * usdkrw
 grand_total_krw = total_stock_krw + total_kr_stock_krw + total_krw_assets + total_usd_assets_krw
 grand_total_usd = total_stock_usd + (total_kr_stock_krw / usdkrw if usdkrw else 0) + total_krw_assets_usd + total_usd_assets
 
+# 한국 상장 ETF 중 미국지수 추종(USExposure=True)으로 표시한 종목은
+# 물리적으로는 KRX 상장이지만 경제적 노출은 미국시장이므로 자산군 집계에서 미국주식으로 옮긴다.
+category_us_krw = total_stock_krw + kr_us_tracking_krw
+category_kr_krw = kr_domestic_krw
+
 current_by_category_krw = {
-    "미국주식": total_stock_krw,
-    "한국주식": total_kr_stock_krw,
+    "미국주식": category_us_krw,
+    "한국주식": category_kr_krw,
     "원화자산": total_krw_assets,
     "달러자산": total_usd_assets_krw,
 }
@@ -695,8 +713,8 @@ if grand_total_krw > 0:
                 "Date": today_str,
                 "TotalKRW": grand_total_krw,
                 "TotalUSD": grand_total_usd,
-                "USStockKRW": total_stock_krw,
-                "KRStockKRW": total_kr_stock_krw,
+                "USStockKRW": category_us_krw,
+                "KRStockKRW": category_kr_krw,
                 "KRWAssetsKRW": total_krw_assets,
                 "USDAssetsKRW": total_usd_assets_krw,
             }
@@ -721,7 +739,7 @@ for _, r in kr_portfolio.iterrows():
     unified_rows.append(
         {
             "자산명": r["Ticker"],
-            "분류": "한국주식",
+            "분류": "미국주식" if r["USExposure"] else "한국주식",
             "금액(KRW)": r["MarketValueKRW"],
             "금액(USD)": r["MarketValueKRW"] / usdkrw if usdkrw else 0,
         }
@@ -757,14 +775,14 @@ m1.metric("총 자산 (KRW)", f"₩{grand_total_krw:,.0f}")
 m2.metric("총 자산 (USD)", f"${grand_total_usd:,.2f}")
 m3.metric(
     "미국주식 비중",
-    f"{(total_stock_krw / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
-    f"₩{total_stock_krw:,.0f}",
+    f"{(category_us_krw / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
+    f"₩{category_us_krw:,.0f}",
 )
 m4, m5, m6 = st.columns(3)
 m4.metric(
     "한국주식 비중",
-    f"{(total_kr_stock_krw / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
-    f"₩{total_kr_stock_krw:,.0f}",
+    f"{(category_kr_krw / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
+    f"₩{category_kr_krw:,.0f}",
 )
 m5.metric(
     "원화자산 비중",
@@ -798,8 +816,8 @@ with tab0:
     with c1:
         type_df = pd.DataFrame(
             [
-                {"구분": "미국주식", "금액(KRW)": total_stock_krw},
-                {"구분": "한국주식", "금액(KRW)": total_kr_stock_krw},
+                {"구분": "미국주식", "금액(KRW)": category_us_krw},
+                {"구분": "한국주식", "금액(KRW)": category_kr_krw},
                 {"구분": "원화자산", "금액(KRW)": total_krw_assets},
                 {"구분": "달러자산", "금액(KRW)": total_usd_assets_krw},
             ]
@@ -1023,8 +1041,9 @@ with tab5:
                 "Weight%",
                 "PnLKRW",
                 "PnLPct",
+                "USExposure",
             ]
-        ].sort_values("MarketValueKRW", ascending=False)
+        ].sort_values("MarketValueKRW", ascending=False).rename(columns={"USExposure": "미국지수추종"})
 
         st.dataframe(
             kr_display_df.style.format(
@@ -1042,3 +1061,8 @@ with tab5:
             use_container_width=True,
             height=400,
         )
+        if kr_us_tracking_krw > 0:
+            st.caption(
+                f"ℹ️ 미국지수 추종으로 표시된 종목 합계 ₩{kr_us_tracking_krw:,.0f}는 "
+                "자산군 집계(상단 요약, 전체 자산 배분, 리밸런싱)에서 '미국주식'으로 계산됩니다."
+            )
