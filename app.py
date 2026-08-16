@@ -215,6 +215,7 @@ with st.sidebar:
             key="editor",
         )
         if st.button("변경사항 저장", key="stock_save"):
+            edited = edited.dropna(subset=["Ticker"])
             edited["Ticker"] = edited["Ticker"].astype(str).str.upper().str.strip()
             edited = edited[edited["Ticker"] != ""]
             st.session_state.portfolio = edited.reset_index(drop=True)
@@ -281,6 +282,7 @@ with st.sidebar:
             key="krw_editor",
         )
         if st.button("변경사항 저장", key="krw_save"):
+            krw_edited = krw_edited.dropna(subset=["Name"])
             krw_edited["Name"] = krw_edited["Name"].astype(str).str.strip()
             krw_edited = krw_edited[krw_edited["Name"] != ""]
             st.session_state.krw_assets = krw_edited.reset_index(drop=True)
@@ -347,6 +349,7 @@ with st.sidebar:
             key="usd_editor",
         )
         if st.button("변경사항 저장", key="usd_save"):
+            usd_edited = usd_edited.dropna(subset=["Name"])
             usd_edited["Name"] = usd_edited["Name"].astype(str).str.strip()
             usd_edited = usd_edited[usd_edited["Name"] != ""]
             st.session_state.usd_assets = usd_edited.reset_index(drop=True)
@@ -365,14 +368,20 @@ with st.sidebar:
 
 # ---------------- Data prep: US stocks ----------------
 portfolio = st.session_state.portfolio.copy()
-portfolio = portfolio[portfolio["Ticker"].astype(str).str.strip() != ""]
+portfolio = portfolio.dropna(subset=["Ticker"])
+portfolio["Ticker"] = portfolio["Ticker"].astype(str).str.strip()
+portfolio = portfolio[portfolio["Ticker"] != ""]
 
 krw_assets = st.session_state.krw_assets.copy()
-krw_assets = krw_assets[krw_assets["Name"].astype(str).str.strip() != ""]
+krw_assets = krw_assets.dropna(subset=["Name"])
+krw_assets["Name"] = krw_assets["Name"].astype(str).str.strip()
+krw_assets = krw_assets[krw_assets["Name"] != ""]
 krw_assets["Amount"] = pd.to_numeric(krw_assets["Amount"], errors="coerce").fillna(0)
 
 usd_assets = st.session_state.usd_assets.copy()
-usd_assets = usd_assets[usd_assets["Name"].astype(str).str.strip() != ""]
+usd_assets = usd_assets.dropna(subset=["Name"])
+usd_assets["Name"] = usd_assets["Name"].astype(str).str.strip()
+usd_assets = usd_assets[usd_assets["Name"] != ""]
 usd_assets["Amount"] = pd.to_numeric(usd_assets["Amount"], errors="coerce").fillna(0)
 
 if portfolio.empty and krw_assets.empty and usd_assets.empty:
