@@ -8,6 +8,9 @@ import yfinance as yf
 PORTFOLIO_FILE = "portfolio.csv"
 REQUIRED_COLUMNS = ["Ticker", "Shares", "AvgCost"]
 
+KR_FILE = "kr_portfolio.csv"
+KR_COLUMNS = ["Ticker", "Shares", "AvgCost"]
+
 KRW_FILE = "krw_assets.csv"
 KRW_COLUMNS = ["Name", "Category", "Amount"]
 KRW_CATEGORIES = ["현금", "예금/적금", "국내주식", "부동산", "채권", "기타"]
@@ -73,6 +76,21 @@ def load_portfolio() -> pd.DataFrame:
 
 def save_portfolio(df: pd.DataFrame) -> None:
     df.to_csv(PORTFOLIO_FILE, index=False)
+
+
+def load_kr_portfolio() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(KR_FILE)
+        for col in KR_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0
+        return df[KR_COLUMNS]
+    except FileNotFoundError:
+        return pd.DataFrame(columns=KR_COLUMNS)
+
+
+def save_kr_portfolio(df: pd.DataFrame) -> None:
+    df.to_csv(KR_FILE, index=False)
 
 
 def load_krw_assets() -> pd.DataFrame:
@@ -149,6 +167,8 @@ def fetch_usdkrw() -> float | None:
 
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = load_portfolio()
+if "kr_portfolio" not in st.session_state:
+    st.session_state.kr_portfolio = load_kr_portfolio()
 if "krw_assets" not in st.session_state:
     st.session_state.krw_assets = load_krw_assets()
 if "usd_assets" not in st.session_state:
@@ -227,8 +247,77 @@ with st.sidebar:
         st.download_button("CSV 다운로드", csv_bytes, "portfolio_export.csv", "text/csv", key="stock_dl")
 
     st.divider()
-    st.header("🇰🇷 원화자산 관리")
-    st.caption("현금, 예금/적금, 국내주식, 부동산 등 원화 기준 자산")
+    st.header("🇰🇷 한국주식 관리")
+    st.caption("티커에 코스피는 .KS, 코스닥은 .KQ를 붙이세요. 예: 삼성전자 005930.KS, 에코프로 086520.KQ")
+
+    with st.form("kr_add_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        kr_ticker = c1.text_input("티커 (예: 005930.KS)").strip().upper()
+        kr_shares = c2.number_input("수량", min_value=0.0, step=1.0, value=0.0, key="kr_shares")
+        kr_avg_cost = st.number_input("평단가 (KRW, 선택)", min_value=0.0, step=100.0, value=0.0, key="kr_avg_cost")
+        kr_submitted_stock = st.form_submit_button("추가")
+        if kr_submitted_stock and kr_ticker and kr_shares > 0:
+            df = st.session_state.kr_portfolio
+            if kr_ticker in df["Ticker"].values:
+                df.loc[df["Ticker"] == kr_ticker, "Shares"] += kr_shares
+                if kr_avg_cost > 0:
+                    df.loc[df["Ticker"] == kr_ticker, "AvgCost"] = kr_avg_cost
+            else:
+                new_row = pd.DataFrame(
+                    [{"Ticker": kr_ticker, "Shares": kr_shares, "AvgCost": kr_avg_cost}]
+                )
+                df = pd.concat([df, new_row], ignore_index=True)
+            st.session_state.kr_portfolio = df
+            save_kr_portfolio(df)
+            st.success(f"{kr_ticker} 추가/갱신 완료")
+
+    with st.expander("CSV로 가져오기 (Ticker, Shares, AvgCost)"):
+        kr_uploaded = st.file_uploader("CSV 업로드", type=["csv"], key="kr_stock_csv")
+        if kr_uploaded is not None:
+            try:
+                new_kr_df = pd.read_csv(kr_uploaded)
+                for col in KR_COLUMNS:
+                    if col not in new_kr_df.columns:
+                        new_kr_df[col] = 0
+                new_kr_df = new_kr_df[KR_COLUMNS]
+                kr_mode = st.radio("가져오기 방식", ["교체", "병합(합산)"], horizontal=True, key="kr_stock_mode")
+                if st.button("CSV 적용", key="kr_stock_apply"):
+                    if kr_mode == "교체":
+                        st.session_state.kr_portfolio = new_kr_df
+                    else:
+                        merged = pd.concat([st.session_state.kr_portfolio, new_kr_df], ignore_index=True)
+                        merged = merged.groupby("Ticker", as_index=False).agg(
+                            {"Shares": "sum", "AvgCost": "last"}
+                        )
+                        st.session_state.kr_portfolio = merged
+                    save_kr_portfolio(st.session_state.kr_portfolio)
+                    st.success("CSV 반영 완료")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"CSV 처리 오류: {e}")
+
+    with st.expander("보유 종목 편집"):
+        kr_edited = st.data_editor(
+            st.session_state.kr_portfolio,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="kr_stock_editor",
+        )
+        if st.button("변경사항 저장", key="kr_stock_save"):
+            kr_edited = kr_edited.dropna(subset=["Ticker"])
+            kr_edited["Ticker"] = kr_edited["Ticker"].astype(str).str.upper().str.strip()
+            kr_edited = kr_edited[kr_edited["Ticker"] != ""]
+            st.session_state.kr_portfolio = kr_edited.reset_index(drop=True)
+            save_kr_portfolio(st.session_state.kr_portfolio)
+            st.success("저장 완료")
+            st.rerun()
+
+        kr_csv_bytes = st.session_state.kr_portfolio.to_csv(index=False).encode("utf-8")
+        st.download_button("CSV 다운로드", kr_csv_bytes, "kr_portfolio_export.csv", "text/csv", key="kr_stock_dl")
+
+    st.divider()
+    st.header("🏦 원화자산 관리")
+    st.caption("현금, 예금/적금, 부동산 등 원화 기준 현금성 자산 (국내주식은 위 '한국주식 관리'를 이용하세요)")
 
     with st.form("krw_add_form", clear_on_submit=True):
         name = st.text_input("자산명 (예: 파킹통장)")
@@ -372,6 +461,11 @@ portfolio = portfolio.dropna(subset=["Ticker"])
 portfolio["Ticker"] = portfolio["Ticker"].astype(str).str.strip()
 portfolio = portfolio[portfolio["Ticker"] != ""]
 
+kr_portfolio = st.session_state.kr_portfolio.copy()
+kr_portfolio = kr_portfolio.dropna(subset=["Ticker"])
+kr_portfolio["Ticker"] = kr_portfolio["Ticker"].astype(str).str.upper().str.strip()
+kr_portfolio = kr_portfolio[kr_portfolio["Ticker"] != ""]
+
 krw_assets = st.session_state.krw_assets.copy()
 krw_assets = krw_assets.dropna(subset=["Name"])
 krw_assets["Name"] = krw_assets["Name"].astype(str).str.strip()
@@ -384,15 +478,17 @@ usd_assets["Name"] = usd_assets["Name"].astype(str).str.strip()
 usd_assets = usd_assets[usd_assets["Name"] != ""]
 usd_assets["Amount"] = pd.to_numeric(usd_assets["Amount"], errors="coerce").fillna(0)
 
-if portfolio.empty and krw_assets.empty and usd_assets.empty:
-    st.info("왼쪽 사이드바에서 미국주식, 원화자산 또는 달러자산을 추가하세요.")
+if portfolio.empty and kr_portfolio.empty and krw_assets.empty and usd_assets.empty:
+    st.info("왼쪽 사이드바에서 미국주식, 한국주식, 원화자산 또는 달러자산을 추가하세요.")
     st.stop()
 
 tickers = tuple(sorted(portfolio["Ticker"].unique())) if not portfolio.empty else tuple()
+kr_tickers = tuple(sorted(kr_portfolio["Ticker"].unique())) if not kr_portfolio.empty else tuple()
 
 with st.spinner("실시간 시세 및 환율 조회 중..."):
     prices = fetch_prices(tickers)
     sectors = fetch_sectors(tickers)
+    kr_prices = fetch_prices(kr_tickers)
     usdkrw = fetch_usdkrw()
 
 if not portfolio.empty:
@@ -421,12 +517,46 @@ else:
     portfolio["MarketValueUSD"] = []
     portfolio["DayChangeUSD"] = []
 
+if not kr_portfolio.empty:
+    kr_portfolio["CurrentPrice"] = kr_portfolio["Ticker"].map(lambda t: kr_prices.get(t, {}).get("price"))
+    kr_portfolio["PrevClose"] = kr_portfolio["Ticker"].map(lambda t: kr_prices.get(t, {}).get("prev_close"))
+
+    kr_missing = kr_portfolio[kr_portfolio["CurrentPrice"].isna()]["Ticker"].tolist()
+    if kr_missing:
+        st.warning(f"시세를 가져오지 못한 한국주식: {', '.join(kr_missing)} (티커에 .KS 또는 .KQ가 붙어있는지 확인하세요)")
+
+    kr_portfolio["CurrentPrice"] = kr_portfolio["CurrentPrice"].fillna(0)
+    kr_portfolio["PrevClose"] = kr_portfolio["PrevClose"].fillna(kr_portfolio["CurrentPrice"])
+    kr_portfolio["MarketValueKRW"] = kr_portfolio["Shares"] * kr_portfolio["CurrentPrice"]
+    kr_portfolio["CostBasisKRW"] = kr_portfolio["Shares"] * kr_portfolio["AvgCost"]
+    kr_portfolio["PnLKRW"] = kr_portfolio["MarketValueKRW"] - kr_portfolio["CostBasisKRW"]
+    kr_portfolio["PnLPct"] = kr_portfolio.apply(
+        lambda r: (r["PnLKRW"] / r["CostBasisKRW"] * 100) if r["CostBasisKRW"] > 0 else 0, axis=1
+    )
+    kr_portfolio["DayChangePct"] = kr_portfolio.apply(
+        lambda r: ((r["CurrentPrice"] - r["PrevClose"]) / r["PrevClose"] * 100) if r["PrevClose"] else 0,
+        axis=1,
+    )
+    kr_portfolio["DayChangeKRW"] = (kr_portfolio["CurrentPrice"] - kr_portfolio["PrevClose"]) * kr_portfolio["Shares"]
+else:
+    kr_portfolio["MarketValueKRW"] = []
+    kr_portfolio["DayChangeKRW"] = []
+
+total_kr_cost_krw = kr_portfolio["CostBasisKRW"].sum() if not kr_portfolio.empty else 0.0
+total_kr_pnl_krw = kr_portfolio["PnLKRW"].sum() if not kr_portfolio.empty else 0.0
+total_kr_day_change_krw = kr_portfolio["DayChangeKRW"].sum() if not kr_portfolio.empty else 0.0
+
 total_stock_usd = portfolio["MarketValueUSD"].sum() if not portfolio.empty else 0.0
 total_cost_usd = portfolio["CostBasisUSD"].sum() if not portfolio.empty else 0.0
 total_pnl_usd = portfolio["PnLUSD"].sum() if not portfolio.empty else 0.0
 total_day_change_usd = portfolio["DayChangeUSD"].sum() if not portfolio.empty else 0.0
 portfolio["Weight%"] = (
     portfolio["MarketValueUSD"] / total_stock_usd * 100 if total_stock_usd else 0
+)
+
+total_kr_stock_krw = kr_portfolio["MarketValueKRW"].sum() if not kr_portfolio.empty else 0.0
+kr_portfolio["Weight%"] = (
+    kr_portfolio["MarketValueKRW"] / total_kr_stock_krw * 100 if total_kr_stock_krw else 0
 )
 
 if not usdkrw:
@@ -439,8 +569,8 @@ total_krw_assets_usd = total_krw_assets / usdkrw if usdkrw else 0.0
 total_usd_assets = usd_assets["Amount"].sum() if not usd_assets.empty else 0.0
 total_usd_assets_krw = total_usd_assets * usdkrw
 
-grand_total_krw = total_stock_krw + total_krw_assets + total_usd_assets_krw
-grand_total_usd = total_stock_usd + total_krw_assets_usd + total_usd_assets
+grand_total_krw = total_stock_krw + total_kr_stock_krw + total_krw_assets + total_usd_assets_krw
+grand_total_usd = total_stock_usd + (total_kr_stock_krw / usdkrw if usdkrw else 0) + total_krw_assets_usd + total_usd_assets
 
 # ---------------- Unified asset table (for total allocation view) ----------------
 unified_rows = []
@@ -451,6 +581,15 @@ for _, r in portfolio.iterrows():
             "분류": "미국주식",
             "금액(KRW)": r["MarketValueUSD"] * usdkrw,
             "금액(USD)": r["MarketValueUSD"],
+        }
+    )
+for _, r in kr_portfolio.iterrows():
+    unified_rows.append(
+        {
+            "자산명": r["Ticker"],
+            "분류": "한국주식",
+            "금액(KRW)": r["MarketValueKRW"],
+            "금액(USD)": r["MarketValueKRW"] / usdkrw if usdkrw else 0,
         }
     )
 for _, r in krw_assets.iterrows():
@@ -479,7 +618,7 @@ if not unified_df.empty:
 
 # ---------------- Top metrics ----------------
 st.subheader("전체 자산 요약")
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3 = st.columns(3)
 m1.metric("총 자산 (KRW)", f"₩{grand_total_krw:,.0f}")
 m2.metric("총 자산 (USD)", f"${grand_total_usd:,.2f}")
 m3.metric(
@@ -487,12 +626,18 @@ m3.metric(
     f"{(total_stock_krw / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
     f"₩{total_stock_krw:,.0f}",
 )
+m4, m5, m6 = st.columns(3)
 m4.metric(
+    "한국주식 비중",
+    f"{(total_kr_stock_krw / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
+    f"₩{total_kr_stock_krw:,.0f}",
+)
+m5.metric(
     "원화자산 비중",
     f"{(total_krw_assets / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
     f"₩{total_krw_assets:,.0f}",
 )
-m5.metric(
+m6.metric(
     "달러자산 비중",
     f"{(total_usd_assets_krw / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
     f"${total_usd_assets:,.2f}",
@@ -501,8 +646,15 @@ st.caption(f"USD/KRW 환율: {usdkrw:,.2f}  |  마지막 업데이트: {datetime
 
 st.divider()
 
-tab0, tab1, tab2, tab3 = st.tabs(
-    ["💰 전체 자산 배분", "🇺🇸 종목별 배분", "🏭 섹터별 배분", "📋 미국주식 보유 내역"]
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    [
+        "💰 전체 자산 배분",
+        "🇺🇸 종목별 배분",
+        "🏭 섹터별 배분",
+        "📋 미국주식 보유 내역",
+        "🇰🇷 한국 종목별 배분",
+        "📋 한국주식 보유 내역",
+    ]
 )
 
 with tab0:
@@ -511,13 +663,14 @@ with tab0:
         type_df = pd.DataFrame(
             [
                 {"구분": "미국주식", "금액(KRW)": total_stock_krw},
+                {"구분": "한국주식", "금액(KRW)": total_kr_stock_krw},
                 {"구분": "원화자산", "금액(KRW)": total_krw_assets},
                 {"구분": "달러자산", "금액(KRW)": total_usd_assets_krw},
             ]
         )
         type_df = type_df[type_df["금액(KRW)"] > 0]
         fig_type = px.pie(
-            type_df, names="구분", values="금액(KRW)", hole=0.4, title="미국주식 vs 원화자산 vs 달러자산"
+            type_df, names="구분", values="금액(KRW)", hole=0.4, title="자산군별 비중"
         )
         st.plotly_chart(fig_type, use_container_width=True)
     with c2:
@@ -620,6 +773,66 @@ with tab3:
                     "MarketValueUSD": "${:,.2f}",
                     "Weight%": "{:.1f}%",
                     "PnLUSD": "${:,.2f}",
+                    "PnLPct": "{:.2f}%",
+                }
+            ),
+            use_container_width=True,
+            height=400,
+        )
+
+with tab4:
+    if kr_portfolio.empty:
+        st.info("보유 중인 한국주식이 없습니다.")
+    else:
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            fig_kr = px.pie(
+                kr_portfolio, names="Ticker", values="MarketValueKRW", hole=0.4, title="종목별 자산 비중 (한국주식 내)"
+            )
+            st.plotly_chart(fig_kr, use_container_width=True)
+        with c2:
+            fig_kr2 = px.bar(
+                kr_portfolio.sort_values("Weight%", ascending=True),
+                x="Weight%",
+                y="Ticker",
+                orientation="h",
+                title="종목별 비중 (%)",
+                text_auto=".1f",
+            )
+            st.plotly_chart(fig_kr2, use_container_width=True)
+
+with tab5:
+    if kr_portfolio.empty:
+        st.info("보유 중인 한국주식이 없습니다.")
+    else:
+        st.metric("총 손익 (한국주식)", f"₩{total_kr_pnl_krw:,.0f}",
+                   f"{(total_kr_pnl_krw / total_kr_cost_krw * 100) if total_kr_cost_krw else 0:.2f}%")
+        st.metric("일간 변동 (한국주식)", f"₩{total_kr_day_change_krw:,.0f}")
+
+        kr_display_df = kr_portfolio[
+            [
+                "Ticker",
+                "Shares",
+                "AvgCost",
+                "CurrentPrice",
+                "DayChangePct",
+                "MarketValueKRW",
+                "Weight%",
+                "PnLKRW",
+                "PnLPct",
+            ]
+        ].sort_values("MarketValueKRW", ascending=False)
+
+        st.dataframe(
+            kr_display_df.style.format(
+                {
+                    "Shares": "{:.2f}",
+                    "AvgCost": "₩{:,.0f}",
+                    "CurrentPrice": "₩{:,.0f}",
+                    "DayChangePct": "{:.2f}%",
+                    "MarketValueKRW": "₩{:,.0f}",
+                    "Weight%": "{:.1f}%",
+                    "PnLKRW": "₩{:,.0f}",
                     "PnLPct": "{:.2f}%",
                 }
             ),
