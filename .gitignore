@@ -2,8 +2,10 @@ __pycache__/
 *.pyc
 .venv/
 streamlit.log
+push.log
 portfolio.csv
 krw_assets.csv
+usd_assets.csv
 .streamlit/secrets.toml
 .claude/
 taste-skill/

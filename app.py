@@ -12,6 +12,10 @@ KRW_FILE = "krw_assets.csv"
 KRW_COLUMNS = ["Name", "Category", "Amount"]
 KRW_CATEGORIES = ["현금", "예금/적금", "국내주식", "부동산", "채권", "기타"]
 
+USD_FILE = "usd_assets.csv"
+USD_COLUMNS = ["Name", "Category", "Amount"]
+USD_CATEGORIES = ["현금", "예금/적금(MMF 등)", "채권", "기타"]
+
 st.set_page_config(page_title="전체 자산배분 현황", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown(
@@ -86,6 +90,21 @@ def save_krw_assets(df: pd.DataFrame) -> None:
     df.to_csv(KRW_FILE, index=False)
 
 
+def load_usd_assets() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(USD_FILE)
+        for col in USD_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0
+        return df[USD_COLUMNS]
+    except FileNotFoundError:
+        return pd.DataFrame(columns=USD_COLUMNS)
+
+
+def save_usd_assets(df: pd.DataFrame) -> None:
+    df.to_csv(USD_FILE, index=False)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_prices(tickers: tuple[str, ...]) -> dict[str, dict]:
     result = {}
@@ -132,6 +151,8 @@ if "portfolio" not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 if "krw_assets" not in st.session_state:
     st.session_state.krw_assets = load_krw_assets()
+if "usd_assets" not in st.session_state:
+    st.session_state.usd_assets = load_usd_assets()
 
 st.title("💰 전체 자산배분 현황")
 
@@ -271,6 +292,72 @@ with st.sidebar:
         st.download_button("CSV 다운로드", krw_csv_bytes, "krw_assets_export.csv", "text/csv", key="krw_dl")
 
     st.divider()
+    st.header("💵 달러자산 관리")
+    st.caption("증권사 예수금, 달러 파킹통장/MMF 등 USD로 보유 중인 현금성 자산 (주식 아님)")
+
+    with st.form("usd_add_form", clear_on_submit=True):
+        usd_name = st.text_input("자산명 (예: 증권사 달러예수금)")
+        usd_category = st.selectbox("분류", USD_CATEGORIES)
+        usd_amount = st.number_input("금액 (USD)", min_value=0.0, step=100.0, value=0.0)
+        usd_submitted = st.form_submit_button("추가")
+        if usd_submitted and usd_name and usd_amount > 0:
+            df = st.session_state.usd_assets
+            if usd_name in df["Name"].values:
+                df.loc[df["Name"] == usd_name, "Amount"] += usd_amount
+                df.loc[df["Name"] == usd_name, "Category"] = usd_category
+            else:
+                new_row = pd.DataFrame(
+                    [{"Name": usd_name, "Category": usd_category, "Amount": usd_amount}]
+                )
+                df = pd.concat([df, new_row], ignore_index=True)
+            st.session_state.usd_assets = df
+            save_usd_assets(df)
+            st.success(f"{usd_name} 추가/갱신 완료")
+
+    with st.expander("CSV로 가져오기 (Name, Category, Amount)"):
+        usd_uploaded = st.file_uploader("CSV 업로드", type=["csv"], key="usd_csv")
+        if usd_uploaded is not None:
+            try:
+                new_usd_df = pd.read_csv(usd_uploaded)
+                for col in USD_COLUMNS:
+                    if col not in new_usd_df.columns:
+                        new_usd_df[col] = 0
+                new_usd_df = new_usd_df[USD_COLUMNS]
+                usd_mode = st.radio("가져오기 방식", ["교체", "병합(합산)"], horizontal=True, key="usd_mode")
+                if st.button("CSV 적용", key="usd_apply"):
+                    if usd_mode == "교체":
+                        st.session_state.usd_assets = new_usd_df
+                    else:
+                        merged = pd.concat([st.session_state.usd_assets, new_usd_df], ignore_index=True)
+                        merged = merged.groupby(["Name", "Category"], as_index=False).agg(
+                            {"Amount": "sum"}
+                        )
+                        st.session_state.usd_assets = merged
+                    save_usd_assets(st.session_state.usd_assets)
+                    st.success("CSV 반영 완료")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"CSV 처리 오류: {e}")
+
+    with st.expander("달러자산 편집"):
+        usd_edited = st.data_editor(
+            st.session_state.usd_assets,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="usd_editor",
+        )
+        if st.button("변경사항 저장", key="usd_save"):
+            usd_edited["Name"] = usd_edited["Name"].astype(str).str.strip()
+            usd_edited = usd_edited[usd_edited["Name"] != ""]
+            st.session_state.usd_assets = usd_edited.reset_index(drop=True)
+            save_usd_assets(st.session_state.usd_assets)
+            st.success("저장 완료")
+            st.rerun()
+
+        usd_csv_bytes = st.session_state.usd_assets.to_csv(index=False).encode("utf-8")
+        st.download_button("CSV 다운로드", usd_csv_bytes, "usd_assets_export.csv", "text/csv", key="usd_dl")
+
+    st.divider()
     if st.button("🔄 시세/환율 새로고침"):
         fetch_prices.clear()
         fetch_usdkrw.clear()
@@ -284,8 +371,12 @@ krw_assets = st.session_state.krw_assets.copy()
 krw_assets = krw_assets[krw_assets["Name"].astype(str).str.strip() != ""]
 krw_assets["Amount"] = pd.to_numeric(krw_assets["Amount"], errors="coerce").fillna(0)
 
-if portfolio.empty and krw_assets.empty:
-    st.info("왼쪽 사이드바에서 미국주식 또는 원화자산을 추가하세요.")
+usd_assets = st.session_state.usd_assets.copy()
+usd_assets = usd_assets[usd_assets["Name"].astype(str).str.strip() != ""]
+usd_assets["Amount"] = pd.to_numeric(usd_assets["Amount"], errors="coerce").fillna(0)
+
+if portfolio.empty and krw_assets.empty and usd_assets.empty:
+    st.info("왼쪽 사이드바에서 미국주식, 원화자산 또는 달러자산을 추가하세요.")
     st.stop()
 
 tickers = tuple(sorted(portfolio["Ticker"].unique())) if not portfolio.empty else tuple()
@@ -336,9 +427,11 @@ if not usdkrw:
 total_stock_krw = total_stock_usd * usdkrw
 total_krw_assets = krw_assets["Amount"].sum() if not krw_assets.empty else 0.0
 total_krw_assets_usd = total_krw_assets / usdkrw if usdkrw else 0.0
+total_usd_assets = usd_assets["Amount"].sum() if not usd_assets.empty else 0.0
+total_usd_assets_krw = total_usd_assets * usdkrw
 
-grand_total_krw = total_stock_krw + total_krw_assets
-grand_total_usd = total_stock_usd + total_krw_assets_usd
+grand_total_krw = total_stock_krw + total_krw_assets + total_usd_assets_krw
+grand_total_usd = total_stock_usd + total_krw_assets_usd + total_usd_assets
 
 # ---------------- Unified asset table (for total allocation view) ----------------
 unified_rows = []
@@ -360,6 +453,15 @@ for _, r in krw_assets.iterrows():
             "금액(USD)": r["Amount"] / usdkrw if usdkrw else 0,
         }
     )
+for _, r in usd_assets.iterrows():
+    unified_rows.append(
+        {
+            "자산명": r["Name"],
+            "분류": "달러현금성자산-" + r["Category"],
+            "금액(KRW)": r["Amount"] * usdkrw,
+            "금액(USD)": r["Amount"],
+        }
+    )
 unified_df = pd.DataFrame(unified_rows)
 if not unified_df.empty:
     unified_df["비중%"] = (
@@ -368,7 +470,7 @@ if not unified_df.empty:
 
 # ---------------- Top metrics ----------------
 st.subheader("전체 자산 요약")
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("총 자산 (KRW)", f"₩{grand_total_krw:,.0f}")
 m2.metric("총 자산 (USD)", f"${grand_total_usd:,.2f}")
 m3.metric(
@@ -380,6 +482,11 @@ m4.metric(
     "원화자산 비중",
     f"{(total_krw_assets / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
     f"₩{total_krw_assets:,.0f}",
+)
+m5.metric(
+    "달러자산 비중",
+    f"{(total_usd_assets_krw / grand_total_krw * 100) if grand_total_krw else 0:.1f}%",
+    f"${total_usd_assets:,.2f}",
 )
 st.caption(f"USD/KRW 환율: {usdkrw:,.2f}  |  마지막 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -396,10 +503,12 @@ with tab0:
             [
                 {"구분": "미국주식", "금액(KRW)": total_stock_krw},
                 {"구분": "원화자산", "금액(KRW)": total_krw_assets},
+                {"구분": "달러자산", "금액(KRW)": total_usd_assets_krw},
             ]
         )
+        type_df = type_df[type_df["금액(KRW)"] > 0]
         fig_type = px.pie(
-            type_df, names="구분", values="금액(KRW)", hole=0.4, title="미국주식 vs 원화자산"
+            type_df, names="구분", values="금액(KRW)", hole=0.4, title="미국주식 vs 원화자산 vs 달러자산"
         )
         st.plotly_chart(fig_type, use_container_width=True)
     with c2:
